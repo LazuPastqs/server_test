@@ -2,7 +2,10 @@ const express = require("express");
 const app = express();
 
 // Увеличиваем лимит, так как Base64 строка картинки весит больше обычного текста
-app.use(express.json({ limit: '10mb' }));
+app.use(express.raw({
+    type: "application/octet-stream",
+    limit: "10mb"
+}));
 
 const SECRET_KEY = process.env.SECRET_KEY;
 
@@ -65,13 +68,16 @@ app.get("/", (req, res) => {
 app.post("/frame", (req, res) => {
     if (!checkKey(req)) return res.status(403).send("Forbidden");
 
-    if (isSleeping) return res.send("sleeping");
+    if (isSleeping) return res.sendStatus(204);
 
-    if (req.body && req.body.frame) {
-        lastFrame = req.body.frame;
-        return res.send("ok");
+    if (!req.body || req.body.length === 0) {
+        return res.status(400).send("No frame data");
     }
-    res.status(400).send("No frame data");
+
+    // 👉 теперь это БИНАРНЫЙ JPEG (Buffer)
+    lastFrame = req.body;
+
+    res.sendStatus(200);
 });
 
 // 3. ОТДАЧА КАДРА (В браузер)
@@ -79,17 +85,12 @@ app.get("/video", (req, res) => {
     if (!checkKey(req)) return res.status(403).send("Forbidden");
     if (!lastFrame) return res.status(404).send("No frame yet");
 
-    try {
-        const img = Buffer.from(lastFrame, "base64");
-        res.writeHead(200, {
-            "Content-Type": "image/jpeg",
-            "Content-Length": img.length,
-            "Cache-Control": "no-cache"
-        });
-        res.end(img);
-    } catch (e) {
-        res.status(500).send("Error decoding frame");
-    }
+    res.writeHead(200, {
+        "Content-Type": "image/jpeg",
+        "Cache-Control": "no-cache"
+    });
+
+    res.end(lastFrame);
 });
 
 // 4. ОПРОС КОМАНД (Телефон заходит сюда раз в 2 секунды)
