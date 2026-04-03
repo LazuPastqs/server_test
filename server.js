@@ -1,136 +1,130 @@
 const express = require("express");
 const app = express();
 
-app.use(express.json());
+// Увеличиваем лимит, так как Base64 строка картинки весит больше обычного текста
+app.use(express.json({ limit: '10mb' }));
 
-// 🔐 ключ из переменной окружения
 const SECRET_KEY = process.env.SECRET_KEY;
 
-// 📸 состояние
-let lastFrame = null;
-let isSleeping = false;
-let cameraIndex = 0;
+// СОСТОЯНИЕ
+let lastFrame = null;        // Последний полученный кадр (Base64)
+let isSleeping = false;      // Состояние сна
+let pendingCommand = null;   // Команда, которую телефон еще не забрал
 
-// 🔑 проверка ключа
+// Функция проверки ключа
 function checkKey(req) {
     const key = req.query.key || req.headers["x-api-key"];
     return key && key === SECRET_KEY;
 }
 
-// 🖥 HTML интерфейс
+// 1. ИНТЕРФЕЙС УПРАВЛЕНИЯ
 app.get("/", (req, res) => {
-    if (!checkKey(req)) {
-        return res.status(403).send("Forbidden");
-    }
+    if (!checkKey(req)) return res.status(403).send("Forbidden: Invalid Key");
 
     res.send(`
         <html>
-        <body style="margin:0;background:black;text-align:center;">
-            <h3 style="color:white;">Camera Stream</h3>
+        <head>
+            <title>Remote Camera Control</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+        </head>
+        <body style="margin:0; background:black; color:white; text-align:center; font-family:sans-serif;">
+            <h2>Live Stream</h2>
+            
+            <!-- Картинка обновляется сама каждые 500мс -->
+            <div style="width:100%; min-height:300px; background:#111; display:flex; align-items:center; justify-content:center;">
+                <img id="stream" src="/video?key=${SECRET_KEY}" style="width:100%; max-width:600px;" />
+            </div>
 
-            <img src="/video?key=${SECRET_KEY}" style="width:100%;" />
+            <br>
+            <div style="padding:20px;">
+                <button style="padding:15px; margin:5px;" onclick="sendCmd('switch')">Переключить камеру</button>
+                <button style="padding:15px; margin:5px; background:red; color:white;" onclick="sendCmd('sleep')">В СОН</button>
+                <button style="padding:15px; margin:5px; background:green; color:white;" onclick="sendCmd('wake')">ПРОБУДИТЬ</button>
+            </div>
 
-            <br><br>
+            <script>
+                // Обновление кадра
+                setInterval(() => {
+                    const img = document.getElementById('stream');
+                    img.src = "/video?key=${SECRET_KEY}&t=" + Date.now();
+                }, 500);
 
-            <button onclick="fetch('/switch?key=${SECRET_KEY}')">
-                Switch Camera
-            </button>
-
-            <button onclick="fetch('/sleep?key=${SECRET_KEY}')">
-                Sleep
-            </button>
-
-            <button onclick="fetch('/wake?key=${SECRET_KEY}')">
-                Wake
-            </button>
+                // Отправка команд на сервер
+                function sendCmd(name) {
+                    fetch('/' + name + '?key=${SECRET_KEY}')
+                        .then(r => r.text())
+                        .then(t => alert('Статус: ' + t));
+                }
+            </script>
         </body>
         </html>
     `);
 });
 
-// 📥 получение кадра с телефона
+// 2. ПРИЕМ КАДРА (От телефона)
 app.post("/frame", (req, res) => {
-    if (!checkKey(req)) {
-        return res.status(403).send("Forbidden");
-    }
+    if (!checkKey(req)) return res.status(403).send("Forbidden");
 
-    if (isSleeping) {
-        return res.send("sleeping");
-    }
+    if (isSleeping) return res.send("sleeping");
 
-    if (!req.body || !req.body.frame) {
-        return res.status(400).send("No frame");
+    if (req.body && req.body.frame) {
+        lastFrame = req.body.frame;
+        return res.send("ok");
     }
-
-    lastFrame = req.body.frame;
-    res.send("ok");
+    res.status(400).send("No frame data");
 });
 
-// 📺 отдача видео (как изображение)
+// 3. ОТДАЧА КАДРА (В браузер)
 app.get("/video", (req, res) => {
-    if (!checkKey(req)) {
-        return res.status(403).send("Forbidden");
+    if (!checkKey(req)) return res.status(403).send("Forbidden");
+    if (!lastFrame) return res.status(404).send("No frame yet");
+
+    try {
+        const img = Buffer.from(lastFrame, "base64");
+        res.writeHead(200, {
+            "Content-Type": "image/jpeg",
+            "Content-Length": img.length,
+            "Cache-Control": "no-cache"
+        });
+        res.end(img);
+    } catch (e) {
+        res.status(500).send("Error decoding frame");
     }
-
-    if (!lastFrame) {
-        return res.send("no frame");
-    }
-
-    // base64 → картинка
-    const img = Buffer.from(lastFrame, "base64");
-
-    res.writeHead(200, {
-        "Content-Type": "image/jpeg",
-        "Content-Length": img.length
-    });
-
-    res.end(img);
 });
 
-// 🔄 переключение камеры
+// 4. ОПРОС КОМАНД (Телефон заходит сюда раз в 2 секунды)
+app.get("/get-command", (req, res) => {
+    if (!checkKey(req)) return res.status(403).send("Forbidden");
+    
+    // Отдаем команду и тут же стираем её из памяти сервера
+    res.send(pendingCommand || "none");
+    pendingCommand = null; 
+});
+
+// --- РУЧКИ ДЛЯ КНОПОК ---
+
 app.get("/switch", (req, res) => {
-    if (!checkKey(req)) {
-        return res.status(403).send("Forbidden");
-    }
-
-    cameraIndex = cameraIndex === 0 ? 1 : 0;
-
-    console.log("Switch camera:", cameraIndex);
-
-    res.send("switched");
+    if (!checkKey(req)) return res.status(403).send("Forbidden");
+    pendingCommand = "switch";
+    res.send("Команда на переключение отправлена");
 });
 
-// 😴 sleep
 app.get("/sleep", (req, res) => {
-    if (!checkKey(req)) {
-        return res.status(403).send("Forbidden");
-    }
-
+    if (!checkKey(req)) return res.status(403).send("Forbidden");
     isSleeping = true;
-    console.log("Camera sleeping");
-
-    res.send("sleep");
+    pendingCommand = "sleep";
+    res.send("Режим сна активирован");
 });
 
-// 🔔 wake
 app.get("/wake", (req, res) => {
-    if (!checkKey(req)) {
-        return res.status(403).send("Forbidden");
-    }
-
+    if (!checkKey(req)) return res.status(403).send("Forbidden");
     isSleeping = false;
-    console.log("Camera awake");
-
-    res.send("wake");
+    pendingCommand = "wake";
+    res.send("Пробуждение отправлено");
 });
 
-// 🔥 тест
-app.get("/ping", (req, res) => {
-    res.send("pong");
-});
-
-// 🚀 запуск
-const PORT = process.env.PORT || 1000;
+// ЗАПУСК
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
     console.log("Server started on port " + PORT);
 });
